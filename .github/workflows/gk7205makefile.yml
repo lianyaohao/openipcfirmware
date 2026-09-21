@@ -1,0 +1,30 @@
+name: Build Custom OpenIPC for GK7205V200
+
+on:
+  push:
+    branches: [ master ] # 推送到 master 分支时触发
+  workflow_dispatch: # 允许在 Actions 页面手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo make install-deps
+
+      - name: Build firmware
+        run: |
+          # 使用你的自定义配置进行编译
+          make BOARD=gk7205v200_ultimate_custom
+        # 注意：BOARD 的值应与你创建的配置文件名称匹配（去掉 _defconfig 后缀）
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openipc-gk7205v200-custom-firmware
+          # 根据编译输出结构，上传固件文件
+          path: |
+            output/images/*
