@@ -1,4 +1,4 @@
-name: build-gk7205v200-ultimate
+name: build-hi3516ev200-ultimate
 
 on:
   workflow_dispatch:
@@ -22,15 +22,15 @@ jobs:
           RAW="${{ inputs.commit }}"
           # Only accept a SHA-like string. Anything else (empty, wildcard,
           # branch name, junk) falls back to the workflow run's SHA. This is
-          # what stops strings like "gk7205*" from being passed to
+          # what stops strings like "hi3516*" from being passed to
           # actions/checkout as a ref pattern -- which is what made the fetch
-          # run `+refs/heads/gk7205*:...` and fail with exit code 1.
+          # run `+refs/heads/hi3516*:...` and fail with exit code 1.
           if printf '%s' "$RAW" | grep -Eq '^[0-9a-fA-F]{7,40}$'; then
             REF="$RAW"
             TAG="nightly-bisect-$(printf '%s' "$REF" | cut -c1-7)"
           else
             REF="${{ github.sha }}"
-            TAG="gk7205v200-ultimate-$(printf '%s' "$REF" | cut -c1-7)-$(date -u +%Y%m%d%H%M%S)"
+            TAG="hi3516ev200-ultimate-$(printf '%s' "$REF" | cut -c1-7)-$(date -u +%Y%m%d%H%M%S)"
           fi
           SHORT="$(printf '%s' "$REF" | cut -c1-7)"
           echo "ref=$REF"         >> "$GITHUB_OUTPUT"
@@ -145,7 +145,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gk7205v200-ultimate-firmware
+          name: hi3516ev200-ultimate-firmware
           path: |
             output/images/openipc*.tgz
           if-no-files-found: warn
