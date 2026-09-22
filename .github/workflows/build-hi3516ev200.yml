@@ -1,0 +1,168 @@
+name: build-gk7205v200-ultimate
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: 'Commit SHA to build (optional; leave empty to use current branch HEAD)'
+        required: false
+        default: ''
+
+jobs:
+  resolve:
+    name: Resolve commit
+    runs-on: ubuntu-latest
+    outputs:
+      ref:       ${{ steps.r.outputs.ref }}
+      short_sha: ${{ steps.r.outputs.short_sha }}
+      tag_name:  ${{ steps.r.outputs.tag_name }}
+    steps:
+      - id: r
+        run: |
+          RAW="${{ inputs.commit }}"
+          # Only accept a SHA-like string. Anything else (empty, wildcard,
+          # branch name, junk) falls back to the workflow run's SHA. This is
+          # what stops strings like "gk7205*" from being passed to
+          # actions/checkout as a ref pattern -- which is what made the fetch
+          # run `+refs/heads/gk7205*:...` and fail with exit code 1.
+          if printf '%s' "$RAW" | grep -Eq '^[0-9a-fA-F]{7,40}$'; then
+            REF="$RAW"
+            TAG="nightly-bisect-$(printf '%s' "$REF" | cut -c1-7)"
+          else
+            REF="${{ github.sha }}"
+            TAG="gk7205v200-ultimate-$(printf '%s' "$REF" | cut -c1-7)-$(date -u +%Y%m%d%H%M%S)"
+          fi
+          SHORT="$(printf '%s' "$REF" | cut -c1-7)"
+          echo "ref=$REF"         >> "$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT" >> "$GITHUB_OUTPUT"
+          echo "tag_name=$TAG"    >> "$GITHUB_OUTPUT"
+          echo "Building hi3516ev200_ultimate at $REF -> release tag $TAG"
+
+  buildroot:
+    name: Firmware (hi3516ev200_ultimate)
+    needs: resolve
+    runs-on: ubuntu-latest
+    # Required for softprops/action-gh-release to create a release.
+    # Without this the token is read-only and the upload fails with 403
+    # "Resource not accessible by integration".
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+          fetch-depth: 0
+
+      - name: Prepare firmware
+        run: |
+          echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
+          echo CACHE_DATE=$(date +%m) >> ${GITHUB_ENV}
+          echo "BR2_DL_DIR=${GITHUB_WORKSPACE}/output/dl" >> ${GITHUB_ENV}
+
+      - name: Setup ccache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/ccache
+          key: hi3516ev200_ultimate-${{ env.CACHE_DATE }}
+
+      # Restore-only on purpose: the `dl-<month>` key is shared with the main
+      # build.yml matrix, and actions/cache only saves on a key miss. Letting
+      # a single-board workflow write it would pin the shared monthly
+      # snapshot to this board's dependency set. Consume, do not define.
+      - name: Restore dl cache
+        uses: actions/cache/restore@v4
+        with:
+          path: output/dl
+          key: dl-${{ env.CACHE_DATE }}
+          restore-keys: dl-
+
+      - name: Refresh moving-ref package downloads
+        run: |
+          if [ -d "${BR2_DL_DIR}" ]; then
+            find "${BR2_DL_DIR}" -type f -regextype posix-extended \
+              -regex '.*[-.](HEAD|master|main|dist)\.tar\.(gz|bz2|xz)' \
+              -print -delete
+            if [ -d "${BR2_DL_DIR}/linux" ]; then
+              find "${BR2_DL_DIR}/linux" -maxdepth 1 -type f -name '*.tar.gz' \
+                -print -delete
+            else
+              echo "no kernel archive cached yet -- nothing to refresh."
+            fi
+          else
+            echo "dl cache is cold (${BR2_DL_DIR} absent) -- nothing to refresh."
+          fi
+
+      - name: Build firmware
+        env:
+          BUILD_ID:  ${{ needs.resolve.outputs.tag_name }}
+          BUILD_SHA: ${{ needs.resolve.outputs.ref }}
+        run: |
+          export GIT_HASH=$(git rev-parse --short ${GITHUB_SHA})
+          export GIT_BRANCH=${GITHUB_REF_NAME}
+          echo "GIT_HASH=${GIT_HASH}" >> ${GITHUB_ENV}
+          echo "GIT_BRANCH=${GIT_BRANCH}" >> ${GITHUB_ENV}
+
+          mkdir -p /tmp/ccache
+          ln -sfn /tmp/ccache ${HOME}/.ccache
+
+          backoffs="30 60 120 300 600 1200"
+          attempt=1
+          for sleep_for in $backoffs ""; do
+            if make BOARD=hi3516ev200_ultimate; then
+              break
+            fi
+            if [ -z "$sleep_for" ]; then
+              echo "::error::build failed after ${attempt} attempts"
+              exit 1
+            fi
+            echo "::warning::attempt ${attempt} failed, retrying after ${sleep_for}s"
+            sleep "$sleep_for"
+            attempt=$((attempt + 1))
+          done
+
+          TIME=$(date -d @${SECONDS} +%M:%S)
+          echo "TIME=${TIME}" >> ${GITHUB_ENV}
+
+          NORFW=$(find output/images -name 'openipc*nor*' -print -quit)
+          if [ -n "${NORFW}" ]; then
+            echo "NORFW=${NORFW}" >> ${GITHUB_ENV}
+          fi
+
+          NANDFW=$(find output/images -name 'openipc*nand*' -print -quit)
+          if [ -n "${NANDFW}" ]; then
+            echo "NANDFW=${NANDFW}" >> ${GITHUB_ENV}
+          fi
+
+      - name: Verify kernel modules
+        run: sh .github/scripts/check_target_modules.sh
+
+      # Artifact path: downloads from the Actions run page, works even if the
+      # release step below fails. `if: always()` so a failed module check still
+      # preserves whatever was built.
+      - name: Upload firmware as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gk7205v200-ultimate-firmware
+          path: |
+            output/images/openipc*.tgz
+          if-no-files-found: warn
+          retention-days: 30
+
+      # Release path: needs `permissions: contents: write` above.
+      - name: Upload firmware to release
+        if: env.NORFW != '' || env.NANDFW != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve.outputs.tag_name }}
+          prerelease: true
+          body: |
+            sha=${{ needs.resolve.outputs.ref }}
+            short=${{ needs.resolve.outputs.short_sha }}
+            platform=hi3516ev200_ultimate
+            one_off=true
+          files: |
+            ${{ env.NORFW }}
+            ${{ env.NANDFW }}
